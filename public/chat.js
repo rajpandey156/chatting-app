@@ -285,8 +285,7 @@ async function openChat(chatKey) {
     document.querySelectorAll('.call-btn').forEach(b => b.classList.remove('hidden'));
   }
 
-  messagesEl.innerHTML = '<div class="date-divider"><span>TODAY</span></div>';
-  messagesEl.innerHTML += chatKey === 'group'
+  messagesEl.innerHTML = chatKey === 'group'
     ? '<div class="system-msg">🔒 Messages are end-to-end encrypted</div>'
     : `<div class="system-msg">🔒 Private chat with ${chatKey}</div>`;
 
@@ -295,6 +294,7 @@ async function openChat(chatKey) {
   }
 
   lastSender = null;
+  lastDateLabel = null;
   (chatMessages[chatKey] || []).forEach(m => renderMessage(m));
 
   // Chat khola -> doosre user ke bheje hue saare unseen messages "read" mark karo
@@ -502,13 +502,46 @@ logoutBtn.addEventListener('click', async () => {
 });
 
 // ===================== RENDER MESSAGES =====================
+// WhatsApp-style time: "9:41 pm" (no leading zero on hour, lowercase am/pm)
 function timeStr(date) {
-  return (date || new Date()).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true });
+  date = date || new Date();
+  let h = date.getHours();
+  let m = date.getMinutes();
+  const ampm = h >= 12 ? 'pm' : 'am';
+  h = h % 12 || 12;
+  m = m < 10 ? '0' + m : m;
+  return `${h}:${m} ${ampm}`;
+}
+
+// Returns 'Today' / 'Yesterday' / '02 July 2026' based on message date
+function getDateLabel(date) {
+  const d = new Date(date || new Date());
+  const today = new Date();
+  const yesterday = new Date();
+  yesterday.setDate(today.getDate() - 1);
+  const sameDay = (a, b) => a.toDateString() === b.toDateString();
+  if (sameDay(d, today)) return 'Today';
+  if (sameDay(d, yesterday)) return 'Yesterday';
+  return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'long', year: 'numeric' });
+}
+
+function insertDateDivider(label) {
+  const div = document.createElement('div');
+  div.className = 'date-divider';
+  div.innerHTML = `<span>${label.toUpperCase()}</span>`;
+  messagesEl.appendChild(div);
 }
 
 let lastSender = null;
+let lastDateLabel = null;
 
 function renderMessage(m) {
+  const label = getDateLabel(m.createdAt);
+  if (label !== lastDateLabel) {
+    insertDateDivider(label);
+    lastDateLabel = label;
+    lastSender = null; // date badli to naam dubara dikhado
+  }
   if (m.mediaUrl) appendMedia(m.name, m.mediaUrl, m.mediaType, m.type, m.createdAt, m.id, m.status);
   else appendMessage(m.name, m.message, m.type, m.createdAt, m.id, m.status);
 }
