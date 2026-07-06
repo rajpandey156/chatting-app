@@ -9,6 +9,7 @@
   --wa-input-bg:#ffffff; --wa-divider:#e9edef; --wa-tick:#53bdeb;
   --wa-shadow:rgba(0,0,0,0.08); --sidebar-w:300px;
   --sidebar-bg:#111b21; --sidebar-hover:#1a2631; --sidebar-active:#2a3942;
+  --wa-danger:#e53935;
 }
 
 html,body { height:100%; font-family:'Segoe UI','Helvetica Neue',Arial,sans-serif; background:var(--wa-bg); }
@@ -29,11 +30,13 @@ html,body { height:100%; font-family:'Segoe UI','Helvetica Neue',Arial,sans-seri
   .sidebar-overlay { display:none; position:absolute; inset:0; background:rgba(0,0,0,.45); z-index:15; }
   .sidebar-overlay.show { display:block; }
 }
-.sidebar-header { display:flex; align-items:center; gap:10px; padding:14px 14px 12px; background:#1a2631; flex-shrink:0; }
+.sidebar-header { display:flex; align-items:center; gap:8px; padding:14px 12px 12px; background:#1a2631; flex-shrink:0; }
 .sidebar-avatar { width:38px; height:38px; border-radius:50%; background:var(--wa-teal); display:flex; align-items:center; justify-content:center; flex-shrink:0; }
 .sidebar-my-name { color:#e9edef; font-size:15px; font-weight:600; flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .sidebar-logout { color:rgba(255,255,255,.6)!important; width:32px!important; height:32px!important; }
 .sidebar-logout:hover { background:rgba(255,255,255,.1)!important; color:#fff!important; }
+.sidebar-delete-account { color:rgba(255,120,120,.7)!important; width:32px!important; height:32px!important; }
+.sidebar-delete-account:hover { background:rgba(229,57,53,.18)!important; color:#ff6b6b!important; }
 .chat-list { flex:1; overflow-y:auto; scrollbar-width:thin; scrollbar-color:rgba(255,255,255,.1) transparent; }
 .chat-list::-webkit-scrollbar { width:4px; }
 .chat-list::-webkit-scrollbar-thumb { background:rgba(255,255,255,.1); border-radius:4px; }
@@ -69,6 +72,8 @@ html,body { height:100%; font-family:'Segoe UI','Helvetica Neue',Arial,sans-seri
 .icon-btn { background:transparent; border:none; color:rgba(255,255,255,.85); width:36px; height:36px; border-radius:50%; display:flex; align-items:center; justify-content:center; cursor:pointer; transition:background .15s; }
 .icon-btn:hover { background:rgba(255,255,255,.12); }
 .call-btn { transition:background .15s, opacity .2s; }
+#block-btn.blocked-active { background:rgba(229,57,53,.35); color:#ff8a80; }
+#block-btn.blocked-active:hover { background:rgba(229,57,53,.5); }
 
 /* ── MESSAGES ── */
 .messages { flex:1; overflow-y:auto; padding:8px 8px 4px; display:flex; flex-direction:column; gap:2px; scrollbar-width:thin; scrollbar-color:rgba(0,0,0,.15) transparent; }
@@ -98,6 +103,17 @@ html,body { height:100%; font-family:'Segoe UI','Helvetica Neue',Arial,sans-seri
 .tick { color:var(--wa-subtext); font-size:13px; line-height:1; }
 .tick.read { color:var(--wa-tick); }
 
+/* Delete button — sirf apne sent messages par, hover pe dikhta hai (top-left corner) */
+.msg-delete-btn {
+  position:absolute; top:-8px; left:-8px; width:22px; height:22px; border-radius:50%;
+  background:#fff; border:1px solid var(--wa-divider); color:var(--wa-danger);
+  display:flex; align-items:center; justify-content:center; cursor:pointer;
+  opacity:0; transform:scale(.8); transition:opacity .15s, transform .15s;
+  box-shadow:0 1px 4px rgba(0,0,0,.2); z-index:2;
+}
+.msg-bubble:hover .msg-delete-btn { opacity:1; transform:scale(1); }
+.msg-delete-btn:hover { background:var(--wa-danger); color:#fff; }
+
 /* Media bubbles */
 .media-bubble { padding:4px 4px 22px; min-width:160px; max-width:260px; }
 .msg-img { width:100%; max-width:240px; border-radius:6px; display:block; cursor:pointer; object-fit:cover; max-height:220px; }
@@ -113,15 +129,18 @@ html,body { height:100%; font-family:'Segoe UI','Helvetica Neue',Arial,sans-seri
 /* ── INPUT ── */
 .input-area { display:flex; align-items:flex-end; gap:8px; padding:8px 10px; background:var(--wa-panel); flex-shrink:0; }
 .input-box { flex:1; display:flex; align-items:center; gap:8px; background:var(--wa-input-bg); border-radius:24px; padding:8px 14px; min-height:44px; box-shadow:0 1px 2px rgba(0,0,0,.08); }
+.input-box:has(input:disabled) { opacity:.6; }
 .emoji-btn { background:none; border:none; font-size:22px; cursor:pointer; line-height:1; flex-shrink:0; opacity:.7; transition:opacity .15s; }
 .emoji-btn:hover { opacity:1; }
 .input-box input { flex:1; border:none; background:transparent; color:var(--wa-text); font-size:15px; font-family:inherit; outline:none; }
 .input-box input::placeholder { color:#aebac1; }
+.input-box input:disabled { cursor:not-allowed; }
 .attach-btn { background:none; border:none; color:#8696a0; cursor:pointer; flex-shrink:0; display:flex; align-items:center; transition:color .15s; }
 .attach-btn:hover { color:var(--wa-subtext); }
 #send-btn { width:48px; height:48px; border-radius:50%; border:none; background:var(--wa-green); color:#fff; display:flex; align-items:center; justify-content:center; cursor:pointer; flex-shrink:0; transition:background .2s,transform .1s; box-shadow:0 2px 8px rgba(37,211,102,.35); }
 #send-btn:hover { background:var(--wa-green-dark); }
 #send-btn:active { transform:scale(.92); }
+#send-btn:disabled { background:#b3b3b3; box-shadow:none; cursor:not-allowed; }
 .emoji-panel { display:none; flex-wrap:wrap; padding:10px 12px; background:#fff; border-top:1px solid var(--wa-divider); gap:6px; max-height:140px; overflow-y:auto; }
 .emoji-panel.open { display:flex; }
 .emoji-panel span { font-size:22px; cursor:pointer; padding:4px; border-radius:6px; transition:background .1s; line-height:1; }

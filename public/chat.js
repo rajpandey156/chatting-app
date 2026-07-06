@@ -20,6 +20,8 @@ const mediaInput     = document.getElementById('media-input');
 const mediaLabel     = document.getElementById('media-label');
 const voiceCallBtn   = document.getElementById('voice-call-btn');
 const videoCallBtn   = document.getElementById('video-call-btn');
+const blockBtn        = document.getElementById('block-btn');
+const deleteAccountBtn = document.getElementById('delete-account-btn');
 // Call UI
 const incomingModal    = document.getElementById('incoming-call-modal');
 const callAvatarIn     = document.getElementById('call-avatar-incoming');
@@ -33,11 +35,11 @@ const localVideo       = document.getElementById('local-video');
 const callScreenName   = document.getElementById('call-screen-name');
 const callScreenStatus = document.getElementById('call-screen-status');
 const muteBtn          = document.getElementById('mute-btn');
-const camBtn           = document.getElementById('cam-btn');
-const endCallBtn       = document.getElementById('end-call-btn');
-const lightbox         = document.getElementById('lightbox');
-const lightboxImg      = document.getElementById('lightbox-img');
-const lightboxClose    = document.getElementById('lightbox-close');
+const camBtn            = document.getElementById('cam-btn');
+const endCallBtn        = document.getElementById('end-call-btn');
+const lightbox          = document.getElementById('lightbox');
+const lightboxImg       = document.getElementById('lightbox-img');
+const lightboxClose     = document.getElementById('lightbox-close');
 
 // ===================== AUTH =====================
 let username = '';
@@ -54,6 +56,7 @@ sidebarMyName.textContent = username;
 let currentChat = 'group';
 const chatMessages = { group: [] };
 const unread = {};
+let blockedList = []; // jinko maine block kiya hai
 
 // WebRTC state
 let peerConnection = null;
@@ -65,7 +68,30 @@ let activeCallWith = null;
 let isMuted        = false;
 let isCamOff       = false;
 
-const ICE_SERVERS = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+// Ab ICE servers hardcode nahi — server se load hote hain (STUN + TURN).
+// Fallback STUN-only rakha hai taaki agar /api/ice-servers fail ho jaye
+// (network issue) to bhi same-network calls to chalte rahein.
+let ICE_SERVERS = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' }
+  ]
+};
+
+async function loadIceServers() {
+  try {
+    const res = await fetch('/api/ice-servers');
+    if (res.ok) {
+      const data = await res.json();
+      if (data.iceServers && data.iceServers.length) {
+        ICE_SERVERS = { iceServers: data.iceServers };
+      }
+    }
+  } catch {
+    console.warn('ICE servers load nahi hue, sirf STUN fallback use hoga');
+  }
+}
+await loadIceServers();
 
 // ===================== COLORS =====================
 const nameColors = ['#e53935','#d81b60','#8e24aa','#5e35b1','#1e88e5','#00897b','#43a047','#f4511e','#6d4c41','#00acc1'];
@@ -80,9 +106,6 @@ function getInitial(name) { return name ? name[0].toUpperCase() : '?'; }
 const SINGLE_TICK_SVG = `<svg width="16" height="11" viewBox="0 0 16 11" fill="currentColor"><path d="M11.071.653a.75.75 0 0 1 .205 1.04l-5.5 8a.75.75 0 0 1-1.153.114l-3-3a.75.75 0 0 1 1.06-1.06l2.4 2.4 4.948-7.19a.75.75 0 0 1 1.04-.304z"/></svg>`;
 const DOUBLE_TICK_SVG = `<svg width="16" height="11" viewBox="0 0 16 11" fill="currentColor"><path d="M11.071.653a.75.75 0 0 1 .205 1.04l-5.5 8a.75.75 0 0 1-1.153.114l-3-3a.75.75 0 0 1 1.06-1.06l2.4 2.4 4.948-7.19a.75.75 0 0 1 1.04-.304z"/><path d="M14.571.653a.75.75 0 0 1 .205 1.04l-5.5 8a.75.75 0 0 1-1.153.114L6.573 8.26a.75.75 0 0 1 1.06-1.06l1.4 1.4 4.498-6.542a.75.75 0 0 1 1.04-.305z" opacity="0.7"/></svg>`;
 
-// status: 'sent' -> single grey tick (recipient ka net off / offline tha)
-//         'delivered' -> double grey tick (recipient online hai / ho gaya)
-//         'read' -> double blue tick (recipient ne dekh liya)
 function buildTickNode(status) {
   const span = document.createElement('span');
   if (status === 'read') {
@@ -100,12 +123,10 @@ function buildTickNode(status) {
 
 function updateMessageStatus(id, status) {
   if (!id) return;
-  // in-memory store update (taaki re-render pe bhi sahi tick dikhe)
   Object.values(chatMessages).forEach(arr => {
     const m = arr.find(x => x.id === id);
     if (m) m.status = status;
   });
-  // live DOM update
   const bubble = document.querySelector(`.msg-bubble[data-msg-id="${id}"]`);
   if (!bubble) return;
   const oldTick = bubble.querySelector('.tick');
@@ -143,7 +164,6 @@ socket.on('private-message', (data) => {
 
   if (currentChat === other) {
     renderMessage(msg);
-    // Main chat already khula hai, matlab abhi ke abhi dekh liya -> seen mark karo
     if (type === 'received') socket.emit('mark-seen', { otherUser: other });
   } else {
     unread[other] = (unread[other] || 0) + 1;
@@ -153,12 +173,10 @@ socket.on('private-message', (data) => {
   ensureUserInSidebar(other);
 });
 
-// Recipient ka net wapas ON hua -> hamare bheje single-tick messages double-tick ho jaayenge
 socket.on('messages-delivered', ({ ids }) => {
   (ids || []).forEach(id => updateMessageStatus(id, 'delivered'));
 });
 
-// Recipient ne chat khol kar dekh liya -> double blue tick
 socket.on('messages-seen', ({ ids }) => {
   (ids || []).forEach(id => updateMessageStatus(id, 'read'));
 });
@@ -212,14 +230,90 @@ socket.on('call-failed', ({ reason }) => {
 });
 
 // ===================== SIDEBAR =====================
+async function loadAllUsers() {
+  try {
+    const res = await fetch('/api/users');
+    if (!res.ok) return;
+    const allUsers = await res.json();
+    allUsers.forEach(name => ensureUserInSidebar(name));
+  } catch {}
+}
+loadAllUsers();
+
+// ===================== BLOCK / UNBLOCK =====================
+async function loadBlockedList() {
+  try {
+    const res = await fetch('/api/blocked');
+    if (!res.ok) return;
+    blockedList = await res.json();
+  } catch {}
+}
+loadBlockedList();
+
+function isBlocked(name) { return blockedList.includes(name); }
+
+function updateBlockUI() {
+  if (currentChat === 'group') {
+    blockBtn.classList.add('hidden');
+    msgInput.disabled = false;
+    msgInput.placeholder = 'Message';
+    sendBtn.disabled = false;
+    mediaLabel.style.pointerEvents = '';
+    mediaLabel.style.opacity = '';
+    const existingBanner = document.getElementById('blocked-banner');
+    if (existingBanner) existingBanner.remove();
+    return;
+  }
+  blockBtn.classList.remove('hidden');
+  const blocked = isBlocked(currentChat);
+  blockBtn.title = blocked ? `Unblock ${currentChat}` : `Block ${currentChat}`;
+  blockBtn.classList.toggle('blocked-active', blocked);
+
+  msgInput.disabled = blocked;
+  msgInput.placeholder = blocked ? 'Aapne is user ko block kiya hai' : 'Message';
+  sendBtn.disabled = blocked;
+  mediaLabel.style.pointerEvents = blocked ? 'none' : '';
+  mediaLabel.style.opacity = blocked ? '0.4' : '';
+  voiceCallBtn.style.pointerEvents = blocked ? 'none' : '';
+  voiceCallBtn.style.opacity = blocked ? '0.4' : '';
+  videoCallBtn.style.pointerEvents = blocked ? 'none' : '';
+  videoCallBtn.style.opacity = blocked ? '0.4' : '';
+
+  const existingBanner = document.getElementById('blocked-banner');
+  if (existingBanner) existingBanner.remove();
+  if (blocked) {
+    const banner = document.createElement('div');
+    banner.className = 'system-msg';
+    banner.id = 'blocked-banner';
+    banner.textContent = `🚫 Aapne ${currentChat} ko block kiya hai — messages aana-jaana band hai`;
+    messagesEl.appendChild(banner);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+}
+
+blockBtn.addEventListener('click', async () => {
+  if (currentChat === 'group') return;
+  const target = currentChat;
+  const alreadyBlocked = isBlocked(target);
+  const endpoint = alreadyBlocked ? '/api/unblock' : '/api/block';
+  if (!alreadyBlocked && !confirm(`Kya aap ${target} ko block karna chahte ho? Aap ek-doosre ko msg/call nahi kar paoge.`)) return;
+  try {
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: target })
+    });
+    if (!res.ok) return;
+    if (alreadyBlocked) blockedList = blockedList.filter(n => n !== target);
+    else blockedList.push(target);
+    updateBlockUI();
+  } catch {}
+});
+
 function renderOnlineUsers(users) {
-  // Remove users who went offline (keep elements for known chats)
   document.querySelectorAll('#online-list .chat-item').forEach(el => {
-    const name = el.dataset.chat;
-    if (!users.includes(name)) {
-      const dot = el.querySelector('.online-dot');
-      if (dot) dot.style.display = 'none';
-    }
+    const dot = el.querySelector('.online-dot');
+    if (dot) dot.style.display = 'none';
   });
   users.forEach(name => {
     if (name === username) return;
@@ -268,7 +362,6 @@ async function openChat(chatKey) {
   unread[chatKey] = 0;
   updateChatItemBadge(chatKey, 0);
 
-  // Header
   if (chatKey === 'group') {
     headerName.textContent = 'Group Chat';
     headerAvatar.innerHTML = `<svg width="22" height="22" viewBox="0 0 24 24" fill="#075e54"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>`;
@@ -297,10 +390,11 @@ async function openChat(chatKey) {
   lastDateLabel = null;
   (chatMessages[chatKey] || []).forEach(m => renderMessage(m));
 
-  // Chat khola -> doosre user ke bheje hue saare unseen messages "read" mark karo
   if (chatKey !== 'group') {
     socket.emit('mark-seen', { otherUser: chatKey });
   }
+
+  updateBlockUI();
 
   sidebar.classList.remove('open');
   sidebarOverlay.classList.remove('show');
@@ -317,7 +411,7 @@ async function loadHistory(otherUser) {
       name: m.from, message: m.message || '',
       mediaUrl: m.mediaUrl, mediaType: m.mediaType,
       type: m.from === username ? 'sent' : 'received',
-      status: m.status || 'read', // purane messages (status field se pehle ke) ko read maan lo
+      status: m.status || 'read',
       createdAt: new Date(m.createdAt)
     }));
   } catch {}
@@ -356,7 +450,6 @@ mediaInput.addEventListener('change', async () => {
     const data = await res.json();
     if (!res.ok) { appendSystem('❌ Upload failed: ' + data.error); return; }
     socket.emit('private-media', { to: currentChat, mediaUrl: data.mediaUrl, mediaType: data.mediaType, id: data.id, status: data.status });
-    // Remove "Uploading..." system msg
     const uploading = [...messagesEl.querySelectorAll('.system-msg')].find(el => el.textContent === '⏳ Uploading...');
     if (uploading) uploading.remove();
   } catch (e) {
@@ -408,7 +501,6 @@ function setupPeerConnection(callType) {
     if (['disconnected','failed','closed'].includes(peerConnection.connectionState)) cleanupCall();
   };
 
-  // Hide cam button for voice call
   camBtn.style.display = callType === 'video' ? '' : 'none';
   localVideo.style.display = callType === 'video' ? '' : 'none';
 }
@@ -420,7 +512,6 @@ function showCallScreen(callType, name, status) {
   callScreen.classList.remove('hidden');
 }
 
-// Accept incoming call
 acceptCallBtn.addEventListener('click', async () => {
   incomingModal.classList.add('hidden');
   activeCallWith = incomingFrom;
@@ -448,20 +539,17 @@ acceptCallBtn.addEventListener('click', async () => {
   showCallScreen(incomingCallType, incomingFrom, 'Connecting...');
 });
 
-// Reject
 rejectCallBtn.addEventListener('click', () => {
   socket.emit('call-reject', { to: incomingFrom });
   incomingModal.classList.add('hidden');
 });
 
-// End call
 endCallBtn.addEventListener('click', () => {
   socket.emit('call-end', { to: activeCallWith });
   appendSystem('📵 Call khatam kiya');
   cleanupCall();
 });
 
-// Mute
 muteBtn.addEventListener('click', () => {
   isMuted = !isMuted;
   if (localStream) localStream.getAudioTracks().forEach(t => t.enabled = !isMuted);
@@ -469,7 +557,6 @@ muteBtn.addEventListener('click', () => {
   muteBtn.title = isMuted ? 'Unmute' : 'Mute';
 });
 
-// Camera toggle
 camBtn.addEventListener('click', () => {
   isCamOff = !isCamOff;
   if (localStream) localStream.getVideoTracks().forEach(t => t.enabled = !isCamOff);
@@ -501,8 +588,51 @@ logoutBtn.addEventListener('click', async () => {
   window.location.href = '/';
 });
 
+// ===================== DELETE ACCOUNT =====================
+deleteAccountBtn.addEventListener('click', async () => {
+  const sure = confirm('Kya aap sach mein apna account delete karna chahte ho? Aapke saare messages bhi hamesha ke liye delete ho jayenge. Ye action wapas nahi ho sakta.');
+  if (!sure) return;
+  const doubleSure = confirm('Pakka? Ye final warning hai — account aur data permanently delete ho jayega.');
+  if (!doubleSure) return;
+  try {
+    const res = await fetch('/api/account', { method: 'DELETE' });
+    const data = await res.json();
+    if (!res.ok) { alert(data.error || 'Delete failed'); return; }
+    socket.disconnect();
+    window.location.href = '/';
+  } catch {
+    alert('Network error, dubara try karo');
+  }
+});
+
+socket.on('force-logout', () => {
+  socket.disconnect();
+  window.location.href = '/';
+});
+
+socket.on('user-removed', ({ name }) => {
+  const item = document.getElementById('chat-item-' + name);
+  if (item) item.remove();
+  blockedList = blockedList.filter(n => n !== name);
+  if (currentChat === name) {
+    appendSystem(`${name} ne apna account delete kar diya hai`);
+    openChat('group');
+  }
+});
+
+socket.on('message-deleted', ({ id, from, to }) => {
+  const other = from === username ? to : from;
+  if (chatMessages[other]) {
+    chatMessages[other] = chatMessages[other].filter(m => m.id !== id);
+  }
+  const bubble = document.querySelector(`.msg-bubble[data-msg-id="${id}"]`);
+  if (bubble) {
+    const wrap = bubble.closest('.msg');
+    if (wrap) wrap.remove();
+  }
+});
+
 // ===================== RENDER MESSAGES =====================
-// WhatsApp-style time: "9:41 pm" (no leading zero on hour, lowercase am/pm)
 function timeStr(date) {
   date = date || new Date();
   let h = date.getHours();
@@ -513,7 +643,6 @@ function timeStr(date) {
   return `${h}:${m} ${ampm}`;
 }
 
-// Returns 'Today' / 'Yesterday' / '02 July 2026' based on message date
 function getDateLabel(date) {
   const d = new Date(date || new Date());
   const today = new Date();
@@ -535,12 +664,46 @@ function insertDateDivider(label) {
 let lastSender = null;
 let lastDateLabel = null;
 
+async function deleteMessage(id) {
+  if (!id) return;
+  if (!confirm('Ye message sabke liye delete kar du?')) return;
+  try {
+    const res = await fetch(`/api/message/${id}`, { method: 'DELETE' });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      alert(data.error || 'Delete nahi ho paya');
+      return;
+    }
+    Object.values(chatMessages).forEach(arr => {
+      const idx = arr.findIndex(m => m.id === id);
+      if (idx !== -1) arr.splice(idx, 1);
+    });
+    const bubble = document.querySelector(`.msg-bubble[data-msg-id="${id}"]`);
+    if (bubble) {
+      const wrap = bubble.closest('.msg');
+      if (wrap) wrap.remove();
+    }
+  } catch {
+    alert('Network error, dubara try karo');
+  }
+}
+
+function buildDeleteBtn(id) {
+  const btn = document.createElement('button');
+  btn.className = 'msg-delete-btn';
+  btn.title = 'Delete message';
+  btn.type = 'button';
+  btn.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M6 7h12v13a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V7zm3-3h6l1 2h4v2H4V6h4l1-2z"/></svg>`;
+  btn.addEventListener('click', (e) => { e.stopPropagation(); deleteMessage(id); });
+  return btn;
+}
+
 function renderMessage(m) {
   const label = getDateLabel(m.createdAt);
   if (label !== lastDateLabel) {
     insertDateDivider(label);
     lastDateLabel = label;
-    lastSender = null; // date badli to naam dubara dikhado
+    lastSender = null;
   }
   if (m.mediaUrl) appendMedia(m.name, m.mediaUrl, m.mediaType, m.type, m.createdAt, m.id, m.status);
   else appendMessage(m.name, m.message, m.type, m.createdAt, m.id, m.status);
@@ -572,6 +735,7 @@ function appendMessage(name, text, type, date, id, status) {
 
   if (type === 'sent') {
     meta.appendChild(buildTickNode(status || 'sent'));
+    if (id) bubble.appendChild(buildDeleteBtn(id));
   }
 
   bubble.appendChild(meta);
@@ -620,6 +784,7 @@ function appendMedia(name, mediaUrl, mediaType, type, date, id, status) {
   meta.appendChild(timeEl);
   if (type === 'sent') {
     meta.appendChild(buildTickNode(status || 'sent'));
+    if (id) bubble.appendChild(buildDeleteBtn(id));
   }
   bubble.appendChild(meta);
   div.appendChild(bubble);

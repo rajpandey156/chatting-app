@@ -27,6 +27,7 @@ const userSchema = new mongoose.Schema({
   name:      { type: String, required: true, trim: true, maxlength: 20 },
   email:     { type: String, required: true, unique: true, lowercase: true, trim: true },
   password:  { type: String, required: true },
+  blocked:   { type: [String], default: [] }, // list of usernames this user has blocked
   createdAt: { type: Date, default: Date.now }
 });
 const User = mongoose.model('User', userSchema);
@@ -37,9 +38,6 @@ const msgSchema = new mongoose.Schema({
   message:   { type: String, default: '' },
   mediaUrl:  { type: String, default: null },
   mediaType: { type: String, default: null }, // 'image' | 'video'
-  // sent      -> receiver ka net off tha / offline tha
-  // delivered -> receiver online ho gaya, message uske device tak pahuch gaya
-  // read      -> receiver ne chat khol kar dekh liya
   status:    { type: String, enum: ['sent', 'delivered', 'read'], default: 'sent' },
   createdAt: { type: Date, default: Date.now }
 });
@@ -84,7 +82,6 @@ function authMiddleware(req, res, next) {
 }
 
 // ─── Online users tracking (multi-socket safe) ─────────────────────────────────
-// { userName: Set<socketId> }
 const onlineUsers = {};
 
 function addOnlineUser(name, socketId) {
@@ -107,6 +104,19 @@ function emitToUser(name, event, payload) {
   const ids = getSocketIds(name);
   ids.forEach(id => io.to(id).emit(event, payload));
   return ids.length > 0;
+}
+
+// ─── Block helper ───────────────────────────────────────────────────────────
+async function isBlockedEitherWay(a, b) {
+  try {
+    const [ua, ub] = await Promise.all([
+      User.findOne({ name: a }).select('blocked'),
+      User.findOne({ name: b }).select('blocked')
+    ]);
+    const aBlockedB = ua && ua.blocked.includes(b);
+    const bBlockedA = ub && ub.blocked.includes(a);
+    return !!(aBlockedB || bBlockedA);
+  } catch { return false; }
 }
 
 // ─── Auth Routes ──────────────────────────────────────────────────────────────
@@ -148,13 +158,129 @@ app.get('/api/me', authMiddleware, (req, res) => {
   res.json({ name: req.user.name, email: req.user.email });
 });
 
+// ─── ICE Servers (STUN + TURN) ────────────────────────────────────────────────
+// Client isse call shuru karne se pehle fetch karega. TURN yahan isliye
+// zaroori hai kyunki STUN akela sirf same/easy-NAT networks pe kaam karta
+// hai — alag networks (WiFi <-> mobile data, firewall ke peeche) ke beech
+// call connect karne ke liye TURN relay chahiye hi hoga.
+app.get('/api/ice-servers', authMiddleware, (req, res) => {
+  const iceServers = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' }
+  ];
+
+  if (process.env.TURN_URL) {
+    iceServers.push({
+      urls: process.env.TURN_URL.split(','),
+      username: process.env.TURN_USERNAME,
+      credential: process.env.TURN_CREDENTIAL
+    });
+  }
+
+  res.json({ iceServers });
+});
+
+// ─── All Users (online + offline) ──────────────────────────────────────────────
+app.get('/api/users', authMiddleware, async (req, res) => {
+  try {
+    const users = await User.find({ name: { $ne: req.user.name } })
+      .select('name -_id')
+      .sort({ name: 1 });
+    res.json(users.map(u => u.name));
+  } catch {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ─── Block / Unblock ────────────────────────────────────────────────────────
+app.get('/api/blocked', authMiddleware, async (req, res) => {
+  try {
+    const me = await User.findOne({ name: req.user.name }).select('blocked');
+    res.json(me ? me.blocked : []);
+  } catch { res.status(500).json({ error: 'Server error' }); }
+});
+
+app.post('/api/block', authMiddleware, async (req, res) => {
+  const { name } = req.body;
+  if (!name) return res.status(400).json({ error: 'Naam bhejo' });
+  if (name === req.user.name) return res.status(400).json({ error: 'Khud ko block nahi kar sakte' });
+  try {
+    await User.updateOne({ name: req.user.name }, { $addToSet: { blocked: name } });
+    res.json({ success: true, blocked: name });
+  } catch { res.status(500).json({ error: 'Server error' }); }
+});
+
+app.post('/api/unblock', authMiddleware, async (req, res) => {
+  const { name } = req.body;
+  if (!name) return res.status(400).json({ error: 'Naam bhejo' });
+  try {
+    await User.updateOne({ name: req.user.name }, { $pull: { blocked: name } });
+    res.json({ success: true, unblocked: name });
+  } catch { res.status(500).json({ error: 'Server error' }); }
+});
+
+// ─── Delete a message (sirf sender delete kar sakta hai, sabke liye delete hota hai) ──
+app.delete('/api/message/:id', authMiddleware, async (req, res) => {
+  try {
+    const msg = await PrivateMsg.findById(req.params.id);
+    if (!msg) return res.status(404).json({ error: 'Message nahi mila' });
+    if (msg.from !== req.user.name) return res.status(403).json({ error: 'Sirf apna message delete kar sakte ho' });
+
+    if (msg.mediaUrl) {
+      const filePath = path.join(__dirname, 'public', msg.mediaUrl.replace(/^\//, ''));
+      fs.unlink(filePath, () => {});
+    }
+
+    await PrivateMsg.deleteOne({ _id: msg._id });
+
+    const payload = { id: msg._id.toString(), from: msg.from, to: msg.to };
+    emitToUser(msg.from, 'message-deleted', payload);
+    emitToUser(msg.to, 'message-deleted', payload);
+
+    res.json({ success: true });
+  } catch { res.status(500).json({ error: 'Server error' }); }
+});
+
+// ─── Delete account (khud ka account + saare messages hamesha ke liye delete) ──
+app.delete('/api/account', authMiddleware, async (req, res) => {
+  const me = req.user.name;
+  try {
+    const myMsgs = await PrivateMsg.find({ $or: [{ from: me }, { to: me }] }).select('mediaUrl');
+    myMsgs.forEach(m => {
+      if (m.mediaUrl) {
+        const filePath = path.join(__dirname, 'public', m.mediaUrl.replace(/^\//, ''));
+        fs.unlink(filePath, () => {});
+      }
+    });
+
+    await PrivateMsg.deleteMany({ $or: [{ from: me }, { to: me }] });
+    await User.deleteOne({ name: me });
+    await User.updateMany({}, { $pull: { blocked: me } });
+
+    getSocketIds(me).forEach(id => io.to(id).emit('force-logout'));
+    delete onlineUsers[me];
+    broadcastOnlineList();
+
+    io.emit('user-removed', { name: me });
+
+    res.clearCookie('token');
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // ─── Media Upload ─────────────────────────────────────────────────────────────
 app.post('/api/upload', authMiddleware, upload.single('media'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'File nahi mili' });
+    const { to } = req.body;
+    if (to && await isBlockedEitherWay(req.user.name, to)) {
+      fs.unlink(req.file.path, () => {});
+      return res.status(403).json({ error: 'Ye user blocked hai, media nahi bhej sakte' });
+    }
     const mediaUrl  = '/uploads/' + req.file.filename;
     const mediaType = req.file.mimetype.startsWith('image') ? 'image' : 'video';
-    const { to }    = req.body;
     const status    = isOnline(to) ? 'delivered' : 'sent';
 
     const doc = await PrivateMsg.create({
@@ -213,9 +339,6 @@ io.on('connection', async (socket) => {
   broadcastOnlineList();
   if (wasOffline) socket.broadcast.emit('system', `${userName} is online... 👋`);
 
-  // ── User ka net wapas ON hua -> jitne bhi "sent" (single-tick) messages
-  //    uske liye pending the, unko "delivered" (double grey tick) bana do
-  //    aur original sender ko real-time update bhejo.
   if (wasOffline) {
     try {
       const pending = await PrivateMsg.find({ to: userName, status: 'sent' });
@@ -235,14 +358,16 @@ io.on('connection', async (socket) => {
     } catch {}
   }
 
-  // Group message
   socket.on('user-message', (data) => {
     io.emit('message', { name: userName, message: data.message });
   });
 
-  // Private text message
   socket.on('private-message', async ({ to, message }) => {
     if (!message || !to) return;
+    if (await isBlockedEitherWay(userName, to)) {
+      socket.emit('private-message-info', { note: `${to} ko message nahi bhej sakte (blocked)`, blocked: true, to });
+      return;
+    }
     const status = isOnline(to) ? 'delivered' : 'sent';
     let doc;
     try {
@@ -257,12 +382,15 @@ io.on('connection', async (socket) => {
       status,
       createdAt: doc.createdAt
     };
-    emitToUser(to, 'private-message', payload);
-    socket.emit('private-message', payload); // echo to sender so their UI shows correct tick
+    const delivered = emitToUser(to, 'private-message', payload);
+    socket.emit('private-message', payload);
+    if (!delivered) {
+      socket.emit('private-message-info', { note: `${to} abhi offline hai, message deliver hone par tick update ho jayega` });
+    }
   });
 
-  // Private media message (notify receiver after upload)
-  socket.on('private-media', ({ to, mediaUrl, mediaType, id, status }) => {
+  socket.on('private-media', async ({ to, mediaUrl, mediaType, id, status }) => {
+    if (await isBlockedEitherWay(userName, to)) return;
     const payload = {
       id,
       from: userName,
@@ -277,7 +405,6 @@ io.on('connection', async (socket) => {
     socket.emit('private-message', payload);
   });
 
-  // Receiver ne chat khol kar messages dekh liye -> mark as "read" (blue tick)
   socket.on('mark-seen', async ({ otherUser }) => {
     if (!otherUser) return;
     try {
@@ -290,7 +417,11 @@ io.on('connection', async (socket) => {
   });
 
   // ── WebRTC Signaling ────────────────────────────────────────────────────────
-  socket.on('call-user', ({ to, offer, callType }) => {
+  socket.on('call-user', async ({ to, offer, callType }) => {
+    if (await isBlockedEitherWay(userName, to)) {
+      socket.emit('call-failed', { reason: `${to} ko call nahi kar sakte (blocked)` });
+      return;
+    }
     const delivered = emitToUser(to, 'incoming-call', { from: userName, offer, callType });
     if (!delivered) socket.emit('call-failed', { reason: `${to} abhi online nahi hai` });
   });
